@@ -1,0 +1,62 @@
+# Run all seven troubleshooting MCP servers as HTTP services on one host.
+#
+#   docker compose up -d --build
+#
+# Each is reachable at http://<host>:<port>/mcp . Put a reverse proxy / tunnel in
+# front for TLS + auth before exposing anything (see README hosting notes).
+#
+# NOTE on placement & privileges:
+# - The dns/tls/http services only need outbound internet — no special config.
+# - netdiag / tshark / nmap can scan & capture. To see and capture your LAN they
+#   need host networking and raw-socket capabilities (uncommented below). That
+#   also means they bind on the host's ports directly, so adjust ports to avoid
+#   clashes. A container on a cloud VPS only ever sees the VPS's network, not
+#   your home/office LAN — host these inside the network you want to diagnose.
+
+x-base: &base
+  build: .
+  restart: unless-stopped
+  environment:
+    HOST: 0.0.0.0
+
+services:
+  dns:
+    <<: *base
+    command: ["dns_server", "8001"]
+    ports: ["127.0.0.1:8001:8001"]
+
+  tls:
+    <<: *base
+    command: ["tls_server", "8003"]
+    ports: ["127.0.0.1:8003:8003"]
+
+  http:
+    <<: *base
+    command: ["http_server", "8004"]
+    ports: ["127.0.0.1:8004:8004"]
+
+  troubleshoot:
+    <<: *base
+    command: ["troubleshoot_server", "8007"]
+    ports: ["127.0.0.1:8007:8007"]
+
+  # --- LAN-facing services: need raw sockets (+ host net to capture your LAN) ---
+  netdiag:
+    <<: *base
+    command: ["netdiag_server", "8002"]
+    ports: ["127.0.0.1:8002:8002"]
+    cap_add: ["NET_RAW", "NET_ADMIN"]
+    # network_mode: host   # uncomment to arp-scan / reach the host's LAN directly
+
+  nmap:
+    <<: *base
+    command: ["nmap_server", "8005"]
+    ports: ["127.0.0.1:8005:8005"]
+    cap_add: ["NET_RAW", "NET_ADMIN"]
+
+  tshark:
+    <<: *base
+    command: ["tshark_server", "8006"]
+    ports: ["127.0.0.1:8006:8006"]
+    cap_add: ["NET_RAW", "NET_ADMIN"]
+    # network_mode: host   # required to capture real traffic on the host's interfaces

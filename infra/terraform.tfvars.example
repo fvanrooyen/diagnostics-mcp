@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and adjust.
+name               = "diag-platform"
+region             = "us-east-1"
+kubernetes_version = "1.33"
+node_instance_types = ["t3.large"]
+node_desired_size  = 2
+namespace          = "diagnostics"
+db_instance_class  = "db.t4g.micro"
+db_multi_az        = false

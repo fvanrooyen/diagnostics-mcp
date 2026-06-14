@@ -1,0 +1,46 @@
+# --- Secrets & keys: NEVER commit ---
+*.pem
+*.key
+*_key.pem
+signing_key*.pem
+*.p12
+*.pfx
+.env
+.env.*
+secrets.auto.tfvars
+
+# OAuth server runtime state (tokens, registered clients)
+oauth.db
+*.sqlite
+*.sqlite3
+
+# --- Terraform ---
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+# real configs (keep the .example committed)
+*.tfvars
+!*.tfvars.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+mcpenv/
+.pytest_cache/
+
+# --- Packet captures / scratch outputs ---
+*.pcap
+*.pcapng
+
+# --- OS / editors ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
