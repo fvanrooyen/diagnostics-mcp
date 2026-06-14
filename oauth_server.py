@@ -18,9 +18,12 @@ Design choices (and why):
   - Auth codes are single-use and short-lived, bound to the client, redirect_uri,
     PKCE challenge, scope, user, and the requested `resource` (RFC 8707).
 
-Storage is SQLite for a single instance. For multi-replica EKS, swap the Store
-class for Postgres/Redis/DynamoDB — everything else stays the same. The signing
-key is generated on first run and persisted; in EKS mount it from a Secret.
+Storage is pluggable behind the Store interface: SQLite for a single instance /
+local dev (the default), or Postgres for multi-replica EKS (set DATABASE_URL).
+Both backends implement the same methods, so the endpoints are storage-agnostic.
+The signing key is generated on first run and persisted; in a multi-replica
+deployment all replicas MUST share it (mount it from a Secret) so the JWKS — and
+thus token verification — stays consistent across pods.
 
 THIS IS A LEARNING-GRADE AS. The login is a single configured user. Before
 production: use a real user store/IdP, HTTPS everywhere, rate limiting, and a
@@ -41,6 +44,7 @@ import secrets
 import sqlite3
 import sys
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 
 import jwt
@@ -58,6 +62,9 @@ from starlette.routing import Route
 
 ISSUER = os.environ.get("OAUTH_ISSUER", "http://localhost:9000").rstrip("/")
 DB_PATH = os.environ.get("OAUTH_DB", "/tmp/oauth.db")
+# If set, use Postgres instead of SQLite (multi-replica EKS). The DB ExternalSecret
+# renders this as postgresql://user:pass@host:5432/oauth?sslmode=require.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 KEY_PATH = os.environ.get("OAUTH_KEY", "/tmp/oauth_signing_key.pem")
 ACCESS_TTL = int(os.environ.get("OAUTH_ACCESS_TTL", "3600"))       # 1h
 REFRESH_TTL = int(os.environ.get("OAUTH_REFRESH_TTL", "2592000"))  # 30d
@@ -131,13 +138,43 @@ JWKS = {"keys": [{
 
 
 # --------------------------------------------------------------------------
-# Storage (SQLite). Swap for Postgres/Redis in multi-replica deployments.
+# Storage. SqliteStore (single instance / local dev) and PostgresStore
+# (multi-replica EKS) implement the same Store interface, so the endpoints below
+# never care which backend is in use. Selected at startup by DATABASE_URL.
+#
+# The single-use guarantees (an auth code consumed once, a refresh token rotated
+# once) are enforced with a single atomic `UPDATE ... WHERE NOT used/revoked ...
+# RETURNING *`. A row comes back only to the caller that won the race; concurrent
+# callers — including across replicas sharing one Postgres — get None. The older
+# SELECT-then-UPDATE form was safe only on a single serialized SQLite file.
 # --------------------------------------------------------------------------
 
 class Store:
+    """Interface implemented by SqliteStore and PostgresStore.
+
+    Methods:
+      add_client(client_id, name, redirect_uris)  -> None
+      get_client(client_id)                       -> dict | None  (redirect_uris is JSON text)
+      add_code(**fields)                          -> None
+      consume_code(code)                          -> dict | None  (atomic single-use)
+      add_refresh(**fields)                       -> None
+      rotate_refresh(token)                       -> dict | None  (atomic single-use)
+    """
+
+    def add_client(self, client_id, name, redirect_uris): raise NotImplementedError
+    def get_client(self, client_id): raise NotImplementedError
+    def add_code(self, **kw): raise NotImplementedError
+    def consume_code(self, code): raise NotImplementedError
+    def add_refresh(self, **kw): raise NotImplementedError
+    def rotate_refresh(self, token): raise NotImplementedError
+
+
+class SqliteStore(Store):
+    """File-backed store for a single instance / local dev."""
+
     def __init__(self, path: str):
         self.path = path
-        with self._conn() as c:
+        with closing(self._conn()) as c, c:
             c.executescript("""
             CREATE TABLE IF NOT EXISTS clients(
                 client_id TEXT PRIMARY KEY, client_name TEXT,
@@ -149,6 +186,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS refresh(
                 token TEXT PRIMARY KEY, client_id TEXT, scope TEXT,
                 resource TEXT, sub TEXT, expires INTEGER, revoked INTEGER DEFAULT 0);
+            CREATE INDEX IF NOT EXISTS codes_expires_idx ON codes(expires);
+            CREATE INDEX IF NOT EXISTS refresh_expires_idx ON refresh(expires);
             """)
 
     def _conn(self):
@@ -157,18 +196,18 @@ class Store:
         return c
 
     def add_client(self, client_id, name, redirect_uris):
-        with self._conn() as c:
+        with closing(self._conn()) as c, c:
             c.execute("INSERT INTO clients VALUES(?,?,?,?)",
                       (client_id, name, json.dumps(redirect_uris), int(time.time())))
 
     def get_client(self, client_id):
-        with self._conn() as c:
+        with closing(self._conn()) as c:
             r = c.execute("SELECT * FROM clients WHERE client_id=?",
                           (client_id,)).fetchone()
             return dict(r) if r else None
 
     def add_code(self, **kw):
-        with self._conn() as c:
+        with closing(self._conn()) as c, c:
             c.execute("""INSERT INTO codes(code,client_id,redirect_uri,code_challenge,
                          scope,resource,sub,expires) VALUES(?,?,?,?,?,?,?,?)""",
                       (kw["code"], kw["client_id"], kw["redirect_uri"],
@@ -176,32 +215,124 @@ class Store:
                        kw["sub"], kw["expires"]))
 
     def consume_code(self, code):
-        """Atomically fetch-and-mark-used a code; returns row or None."""
-        with self._conn() as c:
-            r = c.execute("SELECT * FROM codes WHERE code=?", (code,)).fetchone()
-            if not r or r["used"] or r["expires"] < time.time():
-                return None
-            c.execute("UPDATE codes SET used=1 WHERE code=?", (code,))
-            return dict(r)
+        """Atomically mark a valid code used; returns its row or None."""
+        with closing(self._conn()) as c, c:
+            r = c.execute(
+                "UPDATE codes SET used=1 WHERE code=? AND used=0 AND expires>=? "
+                "RETURNING *", (code, int(time.time()))).fetchone()
+            return dict(r) if r else None
 
     def add_refresh(self, **kw):
-        with self._conn() as c:
+        with closing(self._conn()) as c, c:
             c.execute("""INSERT INTO refresh(token,client_id,scope,resource,sub,expires)
                          VALUES(?,?,?,?,?,?)""",
                       (kw["token"], kw["client_id"], kw["scope"], kw["resource"],
                        kw["sub"], kw["expires"]))
 
     def rotate_refresh(self, token):
-        """Validate + revoke an old refresh token; returns its row or None."""
-        with self._conn() as c:
-            r = c.execute("SELECT * FROM refresh WHERE token=?", (token,)).fetchone()
-            if not r or r["revoked"] or r["expires"] < time.time():
-                return None
-            c.execute("UPDATE refresh SET revoked=1 WHERE token=?", (token,))
-            return dict(r)
+        """Atomically revoke a valid refresh token; returns its row or None."""
+        with closing(self._conn()) as c, c:
+            r = c.execute(
+                "UPDATE refresh SET revoked=1 WHERE token=? AND revoked=0 AND "
+                "expires>=? RETURNING *", (token, int(time.time()))).fetchone()
+            return dict(r) if r else None
 
 
-STORE = Store(DB_PATH)
+# Advisory-lock key guarding concurrent CREATE TABLE on first start of N replicas.
+_PG_SCHEMA_LOCK = 0x0A_17_DB_5C
+
+_PG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS clients(
+    client_id TEXT PRIMARY KEY, client_name TEXT,
+    redirect_uris TEXT, created BIGINT);
+CREATE TABLE IF NOT EXISTS codes(
+    code TEXT PRIMARY KEY, client_id TEXT, redirect_uri TEXT,
+    code_challenge TEXT, scope TEXT, resource TEXT, sub TEXT,
+    expires BIGINT, used BOOLEAN NOT NULL DEFAULT false);
+CREATE TABLE IF NOT EXISTS refresh(
+    token TEXT PRIMARY KEY, client_id TEXT, scope TEXT,
+    resource TEXT, sub TEXT, expires BIGINT, revoked BOOLEAN NOT NULL DEFAULT false);
+CREATE INDEX IF NOT EXISTS codes_expires_idx ON codes(expires);
+CREATE INDEX IF NOT EXISTS refresh_expires_idx ON refresh(expires);
+"""
+
+
+class PostgresStore(Store):
+    """Postgres-backed store for multi-replica deployments. Connection-pooled,
+    synchronous (psycopg 3); TLS is configured via the DSN (sslmode), not here."""
+
+    def __init__(self, dsn: str):
+        try:
+            from psycopg_pool import ConnectionPool
+            from psycopg.rows import dict_row
+        except ImportError as e:  # pragma: no cover - dependency hint
+            raise RuntimeError(
+                "DATABASE_URL is set but psycopg is not installed; "
+                "add psycopg[binary,pool] (see requirements.txt)") from e
+        self.pool = ConnectionPool(dsn, min_size=1, max_size=10,
+                                   kwargs={"row_factory": dict_row}, open=True)
+        self._init_schema()
+
+    def _init_schema(self):
+        # Serialize first-run DDL across replicas: the xact advisory lock is held
+        # until the transaction commits, so only one replica creates the tables.
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_PG_SCHEMA_LOCK,))
+            conn.execute(_PG_SCHEMA)
+
+    def add_client(self, client_id, name, redirect_uris):
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "INSERT INTO clients(client_id,client_name,redirect_uris,created) "
+                "VALUES(%s,%s,%s,%s)",
+                (client_id, name, json.dumps(redirect_uris), int(time.time())))
+
+    def get_client(self, client_id):
+        with self.pool.connection() as conn:
+            r = conn.execute("SELECT * FROM clients WHERE client_id=%s",
+                             (client_id,)).fetchone()
+            return dict(r) if r else None
+
+    def add_code(self, **kw):
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "INSERT INTO codes(code,client_id,redirect_uri,code_challenge,"
+                "scope,resource,sub,expires) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (kw["code"], kw["client_id"], kw["redirect_uri"],
+                 kw["code_challenge"], kw["scope"], kw["resource"],
+                 kw["sub"], kw["expires"]))
+
+    def consume_code(self, code):
+        """Atomically mark a valid code used; returns its row or None."""
+        with self.pool.connection() as conn, conn.transaction():
+            r = conn.execute(
+                "UPDATE codes SET used=true WHERE code=%s AND used=false AND "
+                "expires>=%s RETURNING *", (code, int(time.time()))).fetchone()
+            return dict(r) if r else None
+
+    def add_refresh(self, **kw):
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "INSERT INTO refresh(token,client_id,scope,resource,sub,expires) "
+                "VALUES(%s,%s,%s,%s,%s,%s)",
+                (kw["token"], kw["client_id"], kw["scope"], kw["resource"],
+                 kw["sub"], kw["expires"]))
+
+    def rotate_refresh(self, token):
+        """Atomically revoke a valid refresh token; returns its row or None."""
+        with self.pool.connection() as conn, conn.transaction():
+            r = conn.execute(
+                "UPDATE refresh SET revoked=true WHERE token=%s AND revoked=false "
+                "AND expires>=%s RETURNING *", (token, int(time.time()))).fetchone()
+            return dict(r) if r else None
+
+
+def make_store() -> Store:
+    """Pick the backend: Postgres if DATABASE_URL is set, else SQLite."""
+    return PostgresStore(DATABASE_URL) if DATABASE_URL else SqliteStore(DB_PATH)
+
+
+STORE = make_store()
 
 
 # --------------------------------------------------------------------------
