@@ -381,6 +381,11 @@ async def jwks(request: Request):
     return JSONResponse(JWKS)
 
 
+async def healthz(request: Request):
+    """Liveness probe for load balancers / k8s (unauthenticated, no DB hit)."""
+    return JSONResponse({"status": "ok"})
+
+
 async def register(request: Request):
     """Dynamic Client Registration (RFC 7591) — application/json."""
     try:
@@ -538,6 +543,7 @@ def _issue_tokens(client_id, scope, resource, sub):
 
 
 app = Starlette(routes=[
+    Route("/healthz", healthz),
     Route("/.well-known/oauth-authorization-server", metadata),
     Route("/.well-known/jwks.json", jwks),
     Route("/register", register, methods=["POST"]),

@@ -1,0 +1,76 @@
+{{- range .Values.servers }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "diagnostics.labels" $ | nindent 4 }}
+    app: {{ .name }}
+spec:
+  replicas: {{ .replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .name }}
+  template:
+    metadata:
+      labels:
+        {{- include "diagnostics.labels" $ | nindent 8 }}
+        app: {{ .name }}
+    spec:
+      serviceAccountName: {{ $.Values.serviceAccount.name }}
+      containers:
+        - name: {{ .name }}
+          image: {{ include "diagnostics.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["python", "serve_http_auth.py", {{ .module | quote }}, {{ .port | quote }}]
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            # The AS that issues/verifies tokens for this resource.
+            - name: OAUTH_ISSUER
+              value: {{ include "diagnostics.oauthIssuer" $ | quote }}
+            # This server's canonical URL — the audience tokens must carry.
+            - name: RESOURCE_URL
+              value: "https://{{ .name }}.{{ required "domain is required" $.Values.domain }}"
+          ports:
+            - containerPort: {{ .port }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml $.Values.resources | nindent 12 }}
+          {{- if .raw }}
+          # Raw-socket capabilities for arp-scan / nmap / tshark capture. See the
+          # cluster-network caveat in values.yaml.
+          securityContext:
+            capabilities:
+              add: ["NET_RAW", "NET_ADMIN"]
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "diagnostics.labels" $ | nindent 4 }}
+    app: {{ .name }}
+spec:
+  selector:
+    app: {{ .name }}
+  ports:
+    - name: http
+      port: {{ .port }}
+      targetPort: {{ .port }}
+---
+{{- end }}

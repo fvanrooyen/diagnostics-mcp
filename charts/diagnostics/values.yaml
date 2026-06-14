@@ -1,0 +1,114 @@
+# Values for the diagnostics services layer.
+#
+# Install into the namespace Terraform created (where the ESO-managed secrets
+# oauth-db / oauth-signing already live):
+#
+#   helm install diagnostics charts/diagnostics -n diagnostics \
+#     --set image.repository=$(terraform -chdir=infra output -raw ecr_repository_url) \
+#     --set domain=$(terraform -chdir=infra output -raw domain_name) \
+#     --set ingress.certificateArn=$(terraform -chdir=infra output -raw acm_certificate_arn) \
+#     --set serviceAccount.roleArn=$(terraform -chdir=infra output -raw diag_app_role_arn)
+#
+# Before installing, create the demo-user secret the OAuth AS reads (kept out of
+# git and out of these values):
+#
+#   kubectl -n diagnostics create secret generic oauth-admin \
+#     --from-literal=username=admin \
+#     --from-literal=password_hash="$(python oauth_server.py hash 'CHANGE-ME')"
+
+image:
+  repository: "" # REQUIRED: ECR repo URL (terraform output ecr_repository_url)
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Public hosted zone from infra (terraform output domain_name). Each service is
+# exposed at <name>.<domain>; the OAuth AS at <oauth.subdomain>.<domain>. The ACM
+# cert provisioned by infra is a wildcard (*.<domain>), so all of these are covered.
+domain: "" # REQUIRED
+
+serviceAccount:
+  name: diagnostics
+  # IRSA role for the pods (terraform output diag_app_role_arn). Empty = no annotation.
+  roleArn: ""
+
+ingress:
+  enabled: true
+  className: alb
+  # One ALB shared by every host below (saves cost vs an ALB per service).
+  groupName: diagnostics
+  scheme: internet-facing
+  # ACM cert ARN (terraform output acm_certificate_arn). REQUIRED when enabled.
+  certificateArn: ""
+  # ALB health checks hit this on every target; both the AS and the MCP servers
+  # serve it unauthenticated (200).
+  healthcheckPath: /healthz
+
+# Names of the Kubernetes Secrets the pods consume. The first two are materialized
+# by External Secrets Operator (see infra/eso-manifests); the third is created by
+# you (see the header above).
+secrets:
+  db: oauth-db           # key: database_url  (postgresql://...:5432/oauth?sslmode=require)
+  signing: oauth-signing # key: signing_key.pem
+  admin: oauth-admin     # keys: username, password_hash
+
+# Default pod resources (applied to every service; override per chart install).
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: "1"
+    memory: 256Mi
+
+# The self-hosted OAuth 2.1 authorization server (oauth_server.py). Postgres-backed
+# (DATABASE_URL) and sharing one signing key across replicas, so >1 replica is safe.
+oauth:
+  subdomain: auth
+  port: 9000
+  replicas: 2
+  scopes: diagnostics
+
+# The MCP diagnostic servers, each served OAuth-protected via serve_http_auth.py.
+# host = <name>.<domain>; the container runs `serve_http_auth.py <module> <port>`.
+#
+# raw: true adds NET_RAW/NET_ADMIN (needed by arp-scan/raw nmap/tshark capture).
+# NOTE: in EKS these pods see only the cluster's network, not your LAN — host
+# networking is intentionally not enabled here. Host them inside the network you
+# want to diagnose if you need real LAN visibility. raw pods also require the
+# namespace to not enforce the "restricted" Pod Security Standard.
+servers:
+  - name: dns
+    module: dns_server
+    port: 8001
+    replicas: 2
+  - name: tls
+    module: tls_server
+    port: 8003
+    replicas: 2
+  - name: http
+    module: http_server
+    port: 8004
+    replicas: 2
+  - name: troubleshoot
+    module: troubleshoot_server
+    port: 8007
+    replicas: 2
+  - name: netdiag
+    module: netdiag_server
+    port: 8002
+    replicas: 1
+    raw: true
+  - name: nmap
+    module: nmap_server
+    port: 8005
+    replicas: 1
+    raw: true
+  - name: tshark
+    module: tshark_server
+    port: 8006
+    replicas: 1
+    raw: true
+  - name: ssh-diag
+    module: ssh_diag_server
+    port: 8008
+    replicas: 1

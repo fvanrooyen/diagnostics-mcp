@@ -1,0 +1,19 @@
+diagnostics services layer deployed (release: {{ .Release.Name }}, namespace: {{ .Release.Namespace }}).
+
+Endpoints (resolve once your registrar's NS records point at the Route 53 zone and
+the ALB has provisioned — `kubectl get ingress diagnostics -n {{ .Release.Namespace }}`):
+
+  OAuth AS:   {{ include "diagnostics.oauthIssuer" . }}
+{{- range .Values.servers }}
+  {{ .name }}: https://{{ .name }}.{{ $.Values.domain }}/mcp
+{{- end }}
+
+Preflight checklist:
+  1. ESO secrets present:   kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.signing }} {{ .Values.secrets.db }}
+  2. Demo-user secret made: kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.admin }}
+       (keys: username, password_hash — see values.yaml header to create it)
+  3. Pods healthy:          kubectl -n {{ .Release.Namespace }} rollout status deploy/oauth
+  4. ALB up:                kubectl -n {{ .Release.Namespace }} get ingress diagnostics
+
+A Claude custom connector pointed at any <name>.{{ .Values.domain }}/mcp will be
+redirected through the AS for OAuth automatically.
