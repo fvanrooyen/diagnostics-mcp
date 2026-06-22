@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run tests (SQLite backend; Postgres tests skip without TEST_DATABASE_URL)
+        run: pytest tests/ -v
+
+      - uses: azure/setup-helm@v4
+
+      - name: Helm lint (with required placeholder values)
+        run: |
+          helm lint charts/diagnostics \
+            --set image.repository=example.com/diag \
+            --set domain=diag.example.com \
+            --set ingress.certificateArn=arn:aws:acm:us-east-1:000000000000:certificate/placeholder \
+            --set serviceAccount.roleArn=arn:aws:iam::000000000000:role/placeholder
+
+      - name: Helm template renders
+        run: |
+          helm template diagnostics charts/diagnostics \
+            --set image.repository=example.com/diag \
+            --set domain=diag.example.com \
+            --set ingress.certificateArn=arn:aws:acm:us-east-1:000000000000:certificate/placeholder \
+            --set serviceAccount.roleArn=arn:aws:iam::000000000000:role/placeholder >/dev/null
