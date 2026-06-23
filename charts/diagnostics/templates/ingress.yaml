@@ -20,7 +20,7 @@ metadata:
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:
-    - host: {{ .Values.oauth.subdomain }}.{{ required "domain is required" .Values.domain }}
+    - host: {{ required "oauth.subdomain is required" .Values.oauth.subdomain }}.{{ required "domain is required" .Values.domain }}
       http:
         paths:
           - path: /

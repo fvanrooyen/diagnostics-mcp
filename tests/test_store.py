@@ -33,8 +33,13 @@ def _make_pg():
 def store(request, tmp_path):
     """A Store of each available backend, fresh per test."""
     if request.param == "sqlite":
-        return oas.SqliteStore(str(tmp_path / "oauth.db"))
-    return _make_pg()
+        yield oas.SqliteStore(str(tmp_path / "oauth.db"))
+        return
+    pg = _make_pg()
+    try:
+        yield pg
+    finally:
+        pg.pool.close()  # release pooled connections/worker threads
 
 
 # --- helpers ---------------------------------------------------------------

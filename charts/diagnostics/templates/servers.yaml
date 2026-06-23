@@ -50,13 +50,17 @@ spec:
             timeoutSeconds: 3
           resources:
             {{- toYaml $.Values.resources | nindent 12 }}
-          {{- if .raw }}
-          # Raw-socket capabilities for arp-scan / nmap / tshark capture. See the
-          # cluster-network caveat in values.yaml.
+          # Least privilege: drop all default capabilities. Raw servers add back
+          # only NET_RAW/NET_ADMIN for arp-scan / nmap / tshark capture (see the
+          # cluster-network caveat in values.yaml). Containers run as root, so
+          # capture uses these process caps directly.
           securityContext:
+            allowPrivilegeEscalation: false
             capabilities:
+              drop: ["ALL"]
+              {{- if .raw }}
               add: ["NET_RAW", "NET_ADMIN"]
-          {{- end }}
+              {{- end }}
 ---
 apiVersion: v1
 kind: Service
