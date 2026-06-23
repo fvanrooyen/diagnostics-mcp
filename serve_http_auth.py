@@ -17,6 +17,8 @@ import os
 import sys
 
 import uvicorn
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 from mcp_auth import protect
 
@@ -44,6 +46,13 @@ def main() -> None:
     mod.mcp.settings.host = host
     mod.mcp.settings.port = port
     base_app = mod.mcp.streamable_http_app()
+
+    # Unauthenticated liveness route for load balancers / k8s probes. protect()
+    # only guards the MCP path, so any other path (this one) passes through.
+    async def _healthz(request):
+        return PlainTextResponse("ok")
+    base_app.router.routes.append(Route("/healthz", _healthz, methods=["GET"]))
+
     app = protect(base_app, issuer=issuer, resource=resource,
                   protected_path=mod.mcp.settings.streamable_http_path)
 

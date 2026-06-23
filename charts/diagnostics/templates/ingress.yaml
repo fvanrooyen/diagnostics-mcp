@@ -1,0 +1,45 @@
+{{- if .Values.ingress.enabled }}
+{{- if not .Values.ingress.certificateArn }}
+{{- fail "ingress.certificateArn is required when ingress.enabled (terraform output acm_certificate_arn)" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: diagnostics
+  labels:
+    {{- include "diagnostics.labels" . | nindent 4 }}
+  annotations:
+    # All hosts below share ONE ALB via the group name.
+    alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.groupName }}
+    alb.ingress.kubernetes.io/scheme: {{ .Values.ingress.scheme }}
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.certificateArn | quote }}
+    alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.ingress.healthcheckPath | quote }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ required "oauth.subdomain is required" .Values.oauth.subdomain }}.{{ required "domain is required" .Values.domain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth
+                port:
+                  number: {{ .Values.oauth.port }}
+    {{- range .Values.servers }}
+    - host: {{ .name }}.{{ $.Values.domain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .name }}
+                port:
+                  number: {{ .port }}
+    {{- end }}
+{{- end }}

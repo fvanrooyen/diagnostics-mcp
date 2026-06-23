@@ -1,0 +1,10 @@
+apiVersion: v2
+name: diagnostics
+description: >-
+  Services layer for the diagnostics platform: the self-hosted OAuth
+  authorization server plus the OAuth-protected MCP diagnostic servers,
+  fronted by a single AWS ALB. Consumes the cluster, image, IRSA role,
+  ACM cert and ESO-managed secrets provisioned by the Terraform in infra/.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth
+  labels:
+    {{- include "diagnostics.labels" . | nindent 4 }}
+    app: oauth
+spec:
+  replicas: {{ .Values.oauth.replicas }}
+  selector:
+    matchLabels:
+      app: oauth
+  template:
+    metadata:
+      labels:
+        {{- include "diagnostics.labels" . | nindent 8 }}
+        app: oauth
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: oauth
+          image: {{ include "diagnostics.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "oauth_server.py", "serve", {{ .Values.oauth.port | quote }}]
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: OAUTH_ISSUER
+              value: {{ include "diagnostics.oauthIssuer" . | quote }}
+            - name: OAUTH_SCOPES
+              value: {{ .Values.oauth.scopes | quote }}
+            # Signing key is mounted (below); load it instead of generating one,
+            # so every replica serves the same JWKS.
+            - name: OAUTH_KEY
+              value: /etc/oauth/signing_key.pem
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.db }}
+                  key: database_url
+            - name: OAUTH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.admin }}
+                  key: username
+            - name: OAUTH_PASSWORD_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.admin }}
+                  key: password_hash
+          ports:
+            - containerPort: {{ .Values.oauth.port }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.oauth.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.oauth.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: signing
+              mountPath: /etc/oauth
+              readOnly: true
+      volumes:
+        - name: signing
+          secret:
+            secretName: {{ .Values.secrets.signing }}
+            items:
+              - key: signing_key.pem
+                path: signing_key.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth
+  labels:
+    {{- include "diagnostics.labels" . | nindent 4 }}
+    app: oauth
+spec:
+  selector:
+    app: oauth
+  ports:
+    - name: http
+      port: {{ .Values.oauth.port }}
+      targetPort: {{ .Values.oauth.port }}
